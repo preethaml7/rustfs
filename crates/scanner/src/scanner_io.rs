@@ -27,7 +27,7 @@ use metrics::counter;
 use rand::seq::SliceRandom as _;
 #[cfg(test)]
 use rustfs_config::{ENV_SCANNER_MAX_CONCURRENT_DISK_SCANS, ENV_SCANNER_MAX_CONCURRENT_SET_SCANS};
-use rustfs_data_usage::{BucketTargetUsageInfo, BucketUsageInfo};
+use rustfs_data_usage::{BucketTargetUsageInfo, BucketUsageInfo, observed_data_usage_is_newer};
 use rustfs_filemeta::FileMeta;
 use rustfs_heal_contracts::heal_channel::HealScanMode;
 use rustfs_lock::{LockError, NamespaceLockGuard};
@@ -128,7 +128,8 @@ impl ScannerBucketScanScope {
 
 #[derive(Clone, Copy)]
 pub(super) struct ScannerCacheBaselineProof<'a> {
-    pub(super) data: Option<&'a Bytes>,
+    pub(super) authoritative_data: Option<&'a Bytes>,
+    pub(super) observed_candidate_data: Option<&'a Bytes>,
     pub(super) expected_sources: &'a HashSet<DataUsageCacheSource>,
     pub(super) leader_epoch: u64,
     pub(super) want_cycle: u64,
@@ -171,21 +172,23 @@ fn verified_remote_dirty_usage_buckets(
     (received_peers.len() == expected_peers.len()).then_some(dirty_buckets)
 }
 
-fn complete_scanner_cache_baseline_plan_digest(proof: ScannerCacheBaselineProof<'_>) -> Option<DataUsageScanPlanDigest> {
-    let data = proof.data?;
-    let baseline = serde_json::from_slice::<DataUsageInfo>(data).ok()?;
-    if !baseline.is_complete_bucket_usage_snapshot()
-        || baseline.usage_snapshot_partial
-        || baseline.usage_snapshot_converged != Some(true)
-        || baseline.scanner_epoch != Some(proof.leader_epoch)
-        || baseline.usage_snapshot_set_states.len() != proof.expected_sources.len()
+fn complete_scanner_cache_snapshot_plan_digest(
+    snapshot: &DataUsageInfo,
+    proof: ScannerCacheBaselineProof<'_>,
+    expected_converged: bool,
+) -> Option<DataUsageScanPlanDigest> {
+    if !snapshot.is_complete_bucket_usage_snapshot()
+        || snapshot.usage_snapshot_partial
+        || snapshot.usage_snapshot_converged != Some(expected_converged)
+        || snapshot.scanner_epoch != Some(proof.leader_epoch)
+        || snapshot.usage_snapshot_set_states.len() != proof.expected_sources.len()
     {
         return None;
     }
 
     // Completed maintenance also covers ordinary usage. Keep its exact stored
     // proof for cache reuse, and reject mixtures of different set work proofs.
-    let baseline_plan_digest = DataUsageScanPlanDigest(baseline.usage_snapshot_set_states.first()?.scan_plan_digest?);
+    let baseline_plan_digest = DataUsageScanPlanDigest(snapshot.usage_snapshot_set_states.first()?.scan_plan_digest?);
     if ![
         proof.scan_plan_digest,
         scanner_bucket_work_digest(proof.scan_plan_digest, HealScanMode::Normal, true),
@@ -195,8 +198,8 @@ fn complete_scanner_cache_baseline_plan_digest(proof: ScannerCacheBaselineProof<
     {
         return None;
     }
-    let mut states = HashSet::with_capacity(baseline.usage_snapshot_set_states.len());
-    for state in &baseline.usage_snapshot_set_states {
+    let mut states = HashSet::with_capacity(snapshot.usage_snapshot_set_states.len());
+    for state in &snapshot.usage_snapshot_set_states {
         let source = DataUsageCacheSource::new(usize::try_from(state.pool_index).ok()?, usize::try_from(state.set_index).ok()?);
         if !proof.expected_sources.contains(&source)
             || !states.insert(source)
@@ -211,6 +214,30 @@ fn complete_scanner_cache_baseline_plan_digest(proof: ScannerCacheBaselineProof<
     }
 
     (states == *proof.expected_sources).then_some(baseline_plan_digest)
+}
+
+fn complete_scanner_cache_baseline_plan_digest(proof: ScannerCacheBaselineProof<'_>) -> Option<DataUsageScanPlanDigest> {
+    let authoritative = serde_json::from_slice::<DataUsageInfo>(proof.authoritative_data?).ok()?;
+    if complete_scanner_cache_snapshot_plan_digest(&authoritative, proof, true).is_some() {
+        return Some(proof.scan_plan_digest);
+    }
+
+    // A complete but superseded observation may reuse its per-set cache only
+    // when it was explicitly tied to the durable authoritative baseline. It
+    // remains observational: this proof grants bucket-scope reuse only and
+    // never changes authoritative usage publication or dirty acknowledgement.
+    let authoritative_has_identity = (crate::scanner::data_usage_info_has_persisted_baseline_identity(&authoritative)
+        && authoritative.usage_snapshot_converged != Some(false))
+        || crate::scanner::data_usage_info_is_bootstrap_pending(&authoritative);
+    if !authoritative_has_identity {
+        return None;
+    }
+    let observed = serde_json::from_slice::<DataUsageInfo>(proof.observed_candidate_data?).ok()?;
+    if !observed_data_usage_is_newer(&observed, &authoritative) {
+        return None;
+    }
+
+    complete_scanner_cache_snapshot_plan_digest(&observed, proof, false)
 }
 
 fn scoped_scan_scope_from_dirty_buckets(

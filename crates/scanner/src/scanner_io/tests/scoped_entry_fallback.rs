@@ -126,6 +126,7 @@ async fn run_entry(store: &Arc<ECStore>, cycle: u64, selected: Option<&str>, exp
                 scan_mode: HealScanMode::Normal,
                 scan_scope: ScannerBucketScanScope::default(),
                 persisted_usage_baseline: root_before.0.clone().map(Bytes::from),
+                observed_usage_candidate: None,
                 requires_full_scan: false,
                 service_cohort: None,
                 resolved_scope_observer: Some(observer),

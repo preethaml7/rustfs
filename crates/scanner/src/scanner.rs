@@ -1730,6 +1730,7 @@ where
     };
     let baseline_publication_epoch = baseline_publication_guard.epoch();
     let usage_persist_baseline_result = read_data_usage_persist_baseline(storeapi.clone()).await;
+    let observed_usage_candidate_result = read_config(storeapi.clone(), DATA_USAGE_OBSERVED_OBJ_NAME_PATH.as_str()).await;
     drop(baseline_publication_guard);
     let usage_persist_baseline = match usage_persist_baseline_result {
         Ok(baseline) => baseline,
@@ -1750,6 +1751,24 @@ where
             return ScannerCycleOutcome::Failed;
         }
     };
+    let observed_usage_candidate = match observed_usage_candidate_result {
+        Ok(candidate) => Some(Bytes::from(candidate)),
+        Err(EcstoreError::ConfigNotFound) => None,
+        Err(err) => {
+            debug!(
+                target: "rustfs::scanner",
+                event = EVENT_SCANNER_PERSIST_STATE,
+                component = LOG_COMPONENT_SCANNER,
+                subsystem = LOG_SUBSYSTEM_RUNTIME,
+                cycle = cycle_info.current,
+                path = %DATA_USAGE_OBSERVED_OBJ_NAME_PATH.as_str(),
+                state = "observed_candidate_load_failed",
+                error = %err,
+                "Scanner skipped an unavailable observed usage candidate for scoped refresh"
+            );
+            None
+        }
+    };
     let (sender, receiver) = mpsc::channel::<DataUsageInfo>(1);
 
     let done_cycle = Metrics::time(Metric::ScanCycle);
@@ -1764,6 +1783,7 @@ where
             scan_mode,
             scan_scope: crate::scanner_io::ScannerBucketScanScope::default(),
             persisted_usage_baseline: usage_persist_baseline.data.clone(),
+            observed_usage_candidate,
             requires_full_scan: scheduling.requires_full_scan,
             service_cohort: scheduling.service_cohort,
             #[cfg(test)]

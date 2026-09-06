@@ -72,6 +72,7 @@ where
         scan_mode,
         scan_scope: ScannerBucketScanScope::default(),
         persisted_usage_baseline: None,
+        observed_usage_candidate: None,
         requires_full_scan: true,
         service_cohort: None,
         #[cfg(test)]
@@ -89,6 +90,7 @@ pub(crate) struct ScannerCycleRequest {
     pub(crate) scan_mode: HealScanMode,
     pub(crate) scan_scope: ScannerBucketScanScope,
     pub(crate) persisted_usage_baseline: Option<Bytes>,
+    pub(crate) observed_usage_candidate: Option<Bytes>,
     /// Scheduled maintenance must visit clean buckets even with a valid dirty scope.
     pub(crate) requires_full_scan: bool,
     pub(crate) service_cohort: Option<Arc<StdMutex<ScannerServiceCohort>>>,
@@ -185,6 +187,7 @@ where
         scan_mode,
         scan_scope,
         persisted_usage_baseline,
+        observed_usage_candidate,
         requires_full_scan,
         service_cohort,
         #[cfg(test)]
@@ -297,7 +300,8 @@ where
         ScannerBucketScopeResolution {
             requested_scope: scan_scope,
             baseline_proof: ScannerCacheBaselineProof {
-                data: persisted_usage_baseline.as_ref(),
+                authoritative_data: persisted_usage_baseline.as_ref(),
+                observed_candidate_data: observed_usage_candidate.as_ref(),
                 expected_sources: &expected_sources,
                 leader_epoch,
                 want_cycle,
