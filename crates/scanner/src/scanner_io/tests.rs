@@ -40,6 +40,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod scoped_entry_fallback;
+mod service_cohort;
 
 #[derive(Clone)]
 struct FixedWorkloadProvider {
@@ -398,6 +399,7 @@ async fn scoped_scan_production_entry_preserves_deep_and_full_maintenance_work()
                     persisted_usage_baseline: baseline,
                     requires_full_scan,
                     resolved_scope_observer: Some(observer),
+                    service_cohort: None,
                 },
             ),
         )
@@ -470,6 +472,7 @@ async fn scoped_scan_same_cycle_maintenance_rewalks_after_root_delivery_failure(
                     persisted_usage_baseline: None,
                     requires_full_scan: false,
                     resolved_scope_observer: None,
+                    service_cohort: None,
                 },
             ),
         )
@@ -520,6 +523,7 @@ async fn scoped_scan_same_cycle_maintenance_rewalks_after_root_delivery_failure(
                     persisted_usage_baseline: None,
                     requires_full_scan,
                     resolved_scope_observer: None,
+                    service_cohort: None,
                 },
             ),
         )
@@ -1261,6 +1265,7 @@ async fn set_snapshot_reuse_requires_execution_identity_and_fences_stale_writers
         ctx.clone(),
         ScannerCycleBudget::new(&ctx, ScannerCycleBudgetConfig::default()),
         ScannerBucketScanPlan {
+            service_cohort: None,
             buckets: Vec::new(),
             all_buckets: Arc::new(Vec::new()),
             scope: ScannerBucketScanScope::default(),

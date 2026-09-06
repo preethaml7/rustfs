@@ -14,7 +14,6 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-#[cfg(test)]
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
@@ -1585,6 +1584,11 @@ async fn mark_scan_cycle_idle(cycle_info: &mut CurrentCycle, cycle_metrics_guard
     cycle_metrics_guard.finish(cycle_info.clone()).await;
 }
 
+struct ScannerCycleScheduling {
+    requires_full_scan: bool,
+    service_cohort: Option<Arc<StdMutex<crate::scanner_io::ScannerServiceCohort>>>,
+}
+
 #[cfg(test)]
 async fn run_data_scanner_cycle<S>(
     ctx: &CancellationToken,
@@ -1597,7 +1601,19 @@ where
     S: ScannerStorage,
 {
     let cycle_budget = ScannerCycleBudget::new(ctx, scanner_cycle_budget_config());
-    run_data_scanner_cycle_with_budget(ctx, storeapi, cycle_info, cycle_revision, leader_epoch, cycle_budget, true).await
+    run_data_scanner_cycle_with_budget(
+        ctx,
+        storeapi,
+        cycle_info,
+        cycle_revision,
+        leader_epoch,
+        cycle_budget,
+        ScannerCycleScheduling {
+            requires_full_scan: true,
+            service_cohort: None,
+        },
+    )
+    .await
 }
 
 #[instrument(skip_all)]
@@ -1609,7 +1625,7 @@ async fn run_data_scanner_cycle_with_budget<S>(
     cycle_revision: &mut DataUsageCacheRevision,
     leader_epoch: u64,
     cycle_budget: Arc<ScannerCycleBudget>,
-    requires_full_scan: bool,
+    scheduling: ScannerCycleScheduling,
 ) -> ScannerCycleOutcome
 where
     S: ScannerStorage,
@@ -1748,7 +1764,8 @@ where
             scan_mode,
             scan_scope: crate::scanner_io::ScannerBucketScanScope::default(),
             persisted_usage_baseline: usage_persist_baseline.data.clone(),
-            requires_full_scan,
+            requires_full_scan: scheduling.requires_full_scan,
+            service_cohort: scheduling.service_cohort,
             #[cfg(test)]
             resolved_scope_observer: None,
         },
@@ -2610,6 +2627,7 @@ where
     let mut clean_idle_backoff = ScannerCleanIdleBackoff::default();
     let mut superseded_backoff = ScannerRetryBackoff::default();
     let mut deferred_backoff = ScannerRetryBackoff::default();
+    let service_cohort = Arc::new(StdMutex::new(crate::scanner_io::ScannerServiceCohort::default()));
     let initial_runtime_config = resolve_scanner_runtime_config();
     if clean_idle_topology_supported && maintenance_generation_seen.is_none() {
         let Some((features, generation)) = detect_stable_scanner_maintenance_features(&ctx, &storeapi).await else {
@@ -2819,7 +2837,10 @@ where
                 &mut cycle_revision,
                 leader_epoch,
                 cycle_budget.clone(),
-                true,
+                ScannerCycleScheduling {
+                    requires_full_scan: true,
+                    service_cohort: Some(service_cohort.clone()),
+                },
             ),
             guard.lock_lost_notified(),
         )
@@ -3110,11 +3131,14 @@ where
                 &mut cycle_revision,
                 leader_epoch,
                 cycle_budget.clone(),
-                maintenance_features.requires_full_scan(
-                    maintenance_generation_seen,
-                    scanner_maintenance_generation(),
-                    wake_reason,
-                ),
+                ScannerCycleScheduling {
+                    requires_full_scan: maintenance_features.requires_full_scan(
+                        maintenance_generation_seen,
+                        scanner_maintenance_generation(),
+                        wake_reason,
+                    ),
+                    service_cohort: Some(service_cohort.clone()),
+                },
             ),
             guard.lock_lost_notified(),
         )
